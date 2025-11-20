@@ -173,10 +173,13 @@ impl Project {
         // For the rest, we trust the FFI is behaving correctly when called with correct value.
         let uc_res = unsafe {
             let mut c_opts = ptr::null_mut();
-            let mut uc_opts;
-            if let Some(o) = opts {
-                uc_opts = o.as_ffi_copy_object_options();
-                c_opts = ptr::addr_of_mut!(uc_opts);
+            #[cfg(not(target_os = "windows"))]
+            {
+                let mut uc_opts;
+                if let Some(o) = opts {
+                    uc_opts = o.as_ffi_copy_object_options();
+                    c_opts = ptr::addr_of_mut!(uc_opts);
+                }
             }
 
             ulksys::uplink_copy_object(
@@ -455,10 +458,13 @@ impl Project {
         // For the rest, we trust the FFI is behaving correctly when called with correct value.
         let uc_err = unsafe {
             let mut c_opts = ptr::null_mut();
-            let mut uc_opts;
-            if let Some(o) = opts {
-                uc_opts = o.as_ffi_move_object_options();
-                c_opts = ptr::addr_of_mut!(uc_opts);
+            #[cfg(not(target_os = "windows"))]
+            {
+                let mut uc_opts;
+                if let Some(o) = opts {
+                    uc_opts = o.as_ffi_move_object_options();
+                    c_opts = ptr::addr_of_mut!(uc_opts);
+                }
             }
 
             ulksys::uplink_move_object(
@@ -612,10 +618,13 @@ impl Project {
         // For the rest, we trust the FFI is behaving correctly when called with correct value.
         let uc_err = unsafe {
             let mut c_opts = ptr::null_mut();
-            let mut uc_opts;
-            if let Some(o) = opts {
-                uc_opts = o.as_ffi_upload_object_metadata_options();
-                c_opts = ptr::addr_of_mut!(uc_opts);
+            #[cfg(not(target_os = "windows"))]
+            {
+                let mut uc_opts;
+                if let Some(o) = opts {
+                    uc_opts = o.as_ffi_upload_object_metadata_options();
+                    c_opts = ptr::addr_of_mut!(uc_opts);
+                }
             }
 
             ulksys::uplink_update_object_metadata(

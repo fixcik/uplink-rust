@@ -40,6 +40,7 @@ pub struct CopyObject {}
 
 impl CopyObject {
     /// Returns the FFI representation of the options.
+    #[cfg(not(target_os = "windows"))]
     pub(crate) fn as_ffi_copy_object_options(&self) -> ulksys::UplinkCopyObjectOptions {
         ulksys::UplinkCopyObjectOptions {}
     }
@@ -327,6 +328,7 @@ pub struct MoveObject {}
 
 impl MoveObject {
     /// Returns the FFI representation of the options.
+    #[cfg(not(target_os = "windows"))]
     pub(crate) fn as_ffi_move_object_options(&self) -> ulksys::UplinkMoveObjectOptions {
         ulksys::UplinkMoveObjectOptions {}
     }
@@ -361,6 +363,7 @@ pub struct UploadObjectMetadata {}
 
 impl UploadObjectMetadata {
     /// Returns the FFI representation of the options.
+    #[cfg(not(target_os = "windows"))]
     pub(crate) fn as_ffi_upload_object_metadata_options(
         &self,
     ) -> ulksys::UplinkUploadObjectMetadataOptions {
