@@ -64,8 +64,14 @@ fn main() {
     // Header file with complete API interface
     let uplink_c_header = uplink_c_build.join("uplink/uplink.h");
 
-    // Link (statically) to uplink-c library during build
-    println!("cargo:rustc-link-lib=static=uplink");
+    // Link to uplink-c library during build
+    // On Windows, use dynamic linking to avoid Go runtime loader lock deadlock
+    // On other platforms, use static linking
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rustc-link-lib=dylib=uplink");
+    } else {
+        println!("cargo:rustc-link-lib=static=uplink");
+    }
 
     // Add uplink-c build directory to library search path
     println!(

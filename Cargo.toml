@@ -1,2 +1,3 @@
 [workspace]
-members = ["uplink"]
+resolver = "2"
+members = ["uplink", "uplink-sys"]
