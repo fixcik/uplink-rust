@@ -35,7 +35,7 @@ fn main() {
         fs::create_dir_all(build_dir.join("uplink")).ok();
 
         if is_windows {
-            // On Windows, build DLL directly with go build to avoid loader lock deadlock
+            // On Windows, build DLL to avoid loader lock deadlock with static Go runtime
             let status = Command::new("go")
                 .args([
                     "build",
@@ -50,6 +50,85 @@ fn main() {
                 .expect("Failed to run go build for Windows DLL");
             if !status.success() {
                 panic!("go build failed for Windows DLL");
+            }
+
+            // Create import library from DLL
+            // First try gendef + dlltool (MinGW), then fall back to lib.exe
+            let dll_path = build_dir.join("libuplink.dll");
+            let def_path = build_dir.join("libuplink.def");
+            let lib_path = build_dir.join("uplink.lib");
+
+            // Try gendef to create .def file from DLL
+            let gendef_result = Command::new("gendef").arg("-").arg(&dll_path).output();
+
+            if let Ok(output) = gendef_result {
+                if output.status.success() {
+                    fs::write(&def_path, &output.stdout).ok();
+
+                    // Use dlltool to create import library
+                    let dlltool_status = Command::new("dlltool")
+                        .args([
+                            "-d",
+                            &def_path.to_string_lossy(),
+                            "-l",
+                            &lib_path.to_string_lossy(),
+                            "-D",
+                            "libuplink.dll",
+                        ])
+                        .status();
+
+                    if dlltool_status.is_ok() && dlltool_status.unwrap().success() {
+                        eprintln!("Created import library using dlltool");
+                    }
+                }
+            }
+
+            // If dlltool failed, try using MSVC lib.exe with dumpbin
+            if !lib_path.exists() {
+                // Use dumpbin to get exports and create .def
+                let dumpbin_result = Command::new("dumpbin")
+                    .args(["/EXPORTS", &dll_path.to_string_lossy()])
+                    .output();
+
+                if let Ok(output) = dumpbin_result {
+                    if output.status.success() {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let mut def_content = String::from("LIBRARY libuplink\nEXPORTS\n");
+
+                        // Parse dumpbin output for function names
+                        for line in stdout.lines() {
+                            let parts: Vec<&str> = line.split_whitespace().collect();
+                            if parts.len() >= 4 {
+                                // Format: ordinal hint RVA name
+                                if let Ok(_ordinal) = parts[0].parse::<u32>() {
+                                    if let Some(name) = parts.get(3) {
+                                        if name.starts_with("uplink_") || name.starts_with("edge_")
+                                        {
+                                            def_content.push_str(&format!("    {}\n", name));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        fs::write(&def_path, &def_content).ok();
+
+                        // Create import library with lib.exe
+                        Command::new("lib")
+                            .args([
+                                "/MACHINE:X64",
+                                "/NOLOGO",
+                                &format!("/DEF:{}", def_path.display()),
+                                &format!("/OUT:{}", lib_path.display()),
+                            ])
+                            .status()
+                            .ok();
+                    }
+                }
+            }
+
+            if !lib_path.exists() {
+                panic!("Failed to create import library for libuplink.dll. Make sure MinGW (gendef, dlltool) or MSVC tools are available.");
             }
         } else {
             // On Unix, use make
@@ -118,12 +197,8 @@ fn main() {
     // On Windows, use dynamic linking to avoid Go runtime loader lock deadlock
     // On other platforms, use static linking
     if is_windows {
-        println!("cargo:rustc-link-lib=dylib=uplink");
-        // Windows system libraries required by Go runtime
-        println!("cargo:rustc-link-lib=ws2_32");
-        println!("cargo:rustc-link-lib=userenv");
-        println!("cargo:rustc-link-lib=bcrypt");
-        println!("cargo:rustc-link-lib=ntdll");
+        // Link to import library (uplink.lib -> libuplink.dll)
+        println!("cargo:rustc-link-lib=uplink");
     } else {
         println!("cargo:rustc-link-lib=static=uplink");
     }
@@ -134,16 +209,23 @@ fn main() {
         uplink_c_build.to_string_lossy()
     );
 
-    // Also copy DLL to OUT_DIR for runtime (Windows)
+    // Copy DLL to OUT_DIR and try to copy to target dir for runtime (Windows)
     if is_windows {
         let dll_src = uplink_c_build.join("libuplink.dll");
-        let dll_dst = out_dir.join("libuplink.dll");
         if dll_src.exists() {
+            // Copy to OUT_DIR
+            let dll_dst = out_dir.join("libuplink.dll");
             fs::copy(&dll_src, &dll_dst).ok();
-            // Also try to copy to target directory for easier access
-            if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
-                let target_dir = PathBuf::from(manifest_dir).join("../target/debug");
-                if target_dir.exists() {
+
+            // Try to determine and copy to target directory
+            // This helps with running binaries that depend on the DLL
+            if let Ok(profile) = env::var("PROFILE") {
+                if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
+                    let target_dir = PathBuf::from(manifest_dir)
+                        .join("..")
+                        .join("target")
+                        .join(&profile);
+                    fs::create_dir_all(&target_dir).ok();
                     fs::copy(&dll_src, target_dir.join("libuplink.dll")).ok();
                 }
             }
