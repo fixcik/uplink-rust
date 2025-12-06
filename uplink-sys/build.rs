@@ -1,11 +1,27 @@
 extern crate bindgen;
 
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
+    fs::create_dir_all(dst).expect("Failed to create destination directory");
+    for entry in fs::read_dir(src).expect("Failed to read source directory") {
+        let entry = entry.expect("Failed to read directory entry");
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path);
+        } else {
+            fs::copy(&src_path, &dst_path).expect("Failed to copy file");
+        }
+    }
+}
+
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not defined"));
+    let is_windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
 
     // Directory containing uplink-c project source
     let uplink_c_src = PathBuf::from("uplink-c");
@@ -14,48 +30,82 @@ fn main() {
     // installed in the Docker image for building them used by docs.rs
     if env::var("DOCS_RS").is_err() {
         // Build uplink-c generates precompiled lib and header files in .build directory.
-        // We execute the command in its directory because go build, from v1.18, embeds version control
-        // information and the command fails if `-bildvcs=false` isn't set. We don't want to pass the
-        // command-line flag because then it would fail when using a previous Go version.
-        // Copying and building from a copy it doesn't work because it's a git submodule, hence it uses
-        // a relative path to the superproject unless that the destination path is under the same
-        // parent tree directory and with the same depth.
-        Command::new("make")
-            .arg("build")
-            .current_dir(&uplink_c_src)
-            .status()
-            .expect("Failed to run make command from build.rs.");
+        let build_dir = uplink_c_src.join(".build");
+        fs::create_dir_all(&build_dir).ok();
+        fs::create_dir_all(build_dir.join("uplink")).ok();
+
+        if is_windows {
+            // On Windows, build DLL directly with go build to avoid loader lock deadlock
+            let status = Command::new("go")
+                .args([
+                    "build",
+                    "-ldflags=-s -w",
+                    "-buildmode=c-shared",
+                    "-o",
+                    ".build/libuplink.dll",
+                    ".",
+                ])
+                .current_dir(&uplink_c_src)
+                .status()
+                .expect("Failed to run go build for Windows DLL");
+            if !status.success() {
+                panic!("go build failed for Windows DLL");
+            }
+        } else {
+            // On Unix, use make
+            Command::new("make")
+                .arg("build")
+                .current_dir(&uplink_c_src)
+                .status()
+                .expect("Failed to run make command from build.rs.");
+        }
+
+        // Copy header files
+        let headers = ["uplink_definitions.h", "uplink_compat.h"];
+        for header in &headers {
+            let src = uplink_c_src.join(header);
+            let dst = build_dir.join("uplink").join(header);
+            if src.exists() {
+                fs::copy(&src, &dst).ok();
+            }
+        }
+        // Copy generated header - go build creates libuplink.h next to the dll
+        if is_windows {
+            let generated_header = build_dir.join("libuplink.h");
+            if generated_header.exists() {
+                fs::copy(&generated_header, build_dir.join("uplink/uplink.h")).ok();
+            }
+        } else {
+            let generated_header = build_dir.join("uplink.h");
+            if generated_header.exists() {
+                fs::copy(&generated_header, build_dir.join("uplink/uplink.h")).ok();
+            }
+        }
     }
 
     // Directory containing uplink-c project for building
     let uplink_c_dir = out_dir.join("uplink-c");
+
     // Copy project to OUT_DIR for building
-    Command::new("cp")
-        .args([
-            "-Rf",
-            &uplink_c_src.to_string_lossy(),
-            &uplink_c_dir.to_string_lossy(),
-        ])
-        .status()
-        .expect("Failed to copy uplink-c directory.");
+    if uplink_c_dir.exists() {
+        fs::remove_dir_all(&uplink_c_dir).ok();
+    }
+    copy_dir_recursive(&uplink_c_src, &uplink_c_dir);
 
     if env::var("DOCS_RS").is_ok() {
         // Use the precompiled uplink-c libraries for building the docs by docs.rs.
-        Command::new("cp")
-            .args([
-                "-R",
-                &PathBuf::from(".docs-rs").to_string_lossy(),
-                &uplink_c_dir.join(".build").to_string_lossy(),
-            ])
-            .status()
-            .expect("Failed to copy docs-rs precompiled uplink-c lib binaries");
+        let docs_rs_dir = PathBuf::from(".docs-rs");
+        let build_dir = uplink_c_dir.join(".build");
+        if docs_rs_dir.exists() {
+            copy_dir_recursive(&docs_rs_dir, &build_dir);
+        }
     } else {
         // Delete the generated build files for avoiding `cargo publish` to complain about modifying
         // things outside of the OUT_DIR.
-        Command::new("rm")
-            .args(["-r", &uplink_c_src.join(".build").to_string_lossy()])
-            .status()
-            .expect("Failed to delete  uplink-c/.build directory.");
+        let build_dir = uplink_c_src.join(".build");
+        if build_dir.exists() {
+            fs::remove_dir_all(&build_dir).ok();
+        }
     }
 
     // Directory containing uplink-c build
@@ -67,8 +117,13 @@ fn main() {
     // Link to uplink-c library during build
     // On Windows, use dynamic linking to avoid Go runtime loader lock deadlock
     // On other platforms, use static linking
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    if is_windows {
         println!("cargo:rustc-link-lib=dylib=uplink");
+        // Windows system libraries required by Go runtime
+        println!("cargo:rustc-link-lib=ws2_32");
+        println!("cargo:rustc-link-lib=userenv");
+        println!("cargo:rustc-link-lib=bcrypt");
+        println!("cargo:rustc-link-lib=ntdll");
     } else {
         println!("cargo:rustc-link-lib=static=uplink");
     }
@@ -78,6 +133,22 @@ fn main() {
         "cargo:rustc-link-search={}",
         uplink_c_build.to_string_lossy()
     );
+
+    // Also copy DLL to OUT_DIR for runtime (Windows)
+    if is_windows {
+        let dll_src = uplink_c_build.join("libuplink.dll");
+        let dll_dst = out_dir.join("libuplink.dll");
+        if dll_src.exists() {
+            fs::copy(&dll_src, &dll_dst).ok();
+            // Also try to copy to target directory for easier access
+            if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
+                let target_dir = PathBuf::from(manifest_dir).join("../target/debug");
+                if target_dir.exists() {
+                    fs::copy(&dll_src, target_dir.join("libuplink.dll")).ok();
+                }
+            }
+        }
+    }
 
     // Make uplink-c interface header a dependency of the build
     println!(
